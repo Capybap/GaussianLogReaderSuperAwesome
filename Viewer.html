@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gaussian Log Viewer</title>
+<style>
+:root{--bg:#fafaf8;--fg:#1f2328;--mut:#6b7280;--card:#fff;--bd:#d8dce0;--acc:#1a5fb4;--ok:#1a7f37;--bad:#c62828;--hl:#e8f1fb}
+@media (prefers-color-scheme:dark){:root{--bg:#17191c;--fg:#e6e8ea;--mut:#9aa1a9;--card:#1f2226;--bd:#3a3f45;--acc:#7ab0f5;--ok:#56d364;--bad:#ff7b72;--hl:#22364d}}
+body{margin:0;padding:24px;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+main{max-width:900px;margin:auto}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}
+p.sub{color:var(--mut);margin:0 0 16px}
+#drop{border:2px dashed var(--bd);border-radius:10px;padding:28px;text-align:center;background:var(--card);cursor:pointer}
+#drop.over{border-color:var(--acc);background:var(--hl)}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd)}
+th,td{padding:6px 10px;border-bottom:1px solid var(--bd);text-align:left}
+th{background:var(--bg);font-weight:600}
+td.n{font-family:ui-monospace,Consolas,monospace;text-align:right}
+tr.hl td{background:var(--hl);font-weight:600}
+.wrap{overflow-x:auto}
+.warn{color:var(--bad)}.good{color:var(--ok)}
+.ck{font-weight:600;white-space:nowrap}.ck.ok,.banner.ok{color:var(--ok)}.ck.bad,.banner.bad{color:var(--bad)}.ck.warn,.banner.warn{color:#b26a00}.ck.na{color:var(--mut)}.banner{font-size:17px;font-weight:700;margin:16px 0 4px}
+button{padding:6px 12px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+<h1>Gaussian Log Viewer</h1>
+<p class="sub">Runs entirely in your browser. Your file is never uploaded.</p>
+<div id="drop">Drop a Gaussian .log file here, or click to choose one<input id="file" type="file" accept=".log,.out,.txt" hidden></div>
+<div id="out"></div>
+</main>
+<script>
+// PARSE_START
+function parseGaussian(text){
+  const allLines = text.split(/\r?\n/);
+  // Counterpoise jobs repeat the whole calculation for each fragment; properties come from the first (full-system) one
+  const cpIdx = allLines.findIndex(l => /Counterpoise: doing calculation for fragment\s+1 using the basis set of the full-system/.test(l));
+  const lines = cpIdx > 0 ? allLines.slice(0, cpIdx) : allLines;
+  const r = {warnings:[]};
+  const first = (re) => { for (const l of lines) { const x = l.match(re); if (x) return x; } return null; };
+  const last = (re) => { let m=null; for(const l of lines){const x=l.match(re); if(x) m=x;} return m; };
+
+  const routeIdx = lines.findIndex(l => /^\s*#/.test(l));
+  if (routeIdx >= 0) {
+    let route = lines[routeIdx].trim(), i = routeIdx + 1;
+    while (i < lines.length && !/^\s*-{5,}/.test(lines[i]) && lines[i].trim()) route += lines[i].trim(), i++;
+    r.route = route;
+  }
+  let m;
+  r.stoich = (m = last(/Stoichiometry\s+(\S+)/)) ? m[1] : null;
+  r.charge = (m = first(/Charge =\s*(-?\d+)\s+Multiplicity =\s*(\d+)/)) ? m[1] : null;
+  r.mult = m ? m[2] : null;
+  r.pointGroup = (m = last(/Full point group\s+(\S+)/)) ? m[1] : null;
+
+  // SCF energies: keep every "SCF Done", remember the line number
+  const scf = [];
+  let curLabel = "", curNb = null;
+  allLines.forEach((l,i) => {
+    let y = l.match(/Counterpoise: doing (.*)/); if (y) curLabel = y[1].replace(/^calculation for /, "").replace(/, NewBq=T/, "").replace(/\.$/, "").replace(/\s+/g, " ").trim();
+    y = l.match(/(\d+) basis functions,/); if (y) curNb = y[1];
+    const x = l.match(/SCF Done:\s+E\((\S+)\)\s+=\s+(-?\d+\.\d+)\s+A\.U\. after\s+(\d+) cycles/);
+    if (x) scf.push({line:i, fn:x[1], E:x[2], cycles:x[3], label:curLabel, nb:curNb});
+  });
+  r.scf = scf;
+
+  // The converged optimization energy = last SCF Done before the FIRST "Stationary point found"
+  const stat = lines.findIndex(l => /Stationary point found/.test(l));
+  r.optConverged = stat >= 0;
+  let finalIdx = -1;
+  if (stat >= 0) { for (let k=0;k<scf.length;k++) if (scf[k].line < stat) finalIdx = k; }
+  else if (scf.length) { finalIdx = cpIdx > 0 ? 0 : scf.length - 1; }
+  r.finalIdx = finalIdx;
+  r.finalE = finalIdx >= 0 ? scf[finalIdx].E : null;
+  r.fn = finalIdx >= 0 ? scf[finalIdx].fn : null;
+  if (/\bopt/i.test(r.route||"") && !r.optConverged) r.warnings.push('Optimization did not report "Stationary point found". Energy shown is the last SCF energy in the file.');
+
+  // Optimization steps: energy + convergence flags per step
+  r.steps = [];
+  const convRe = /^\s*(Maximum Force|RMS     Force|Maximum Displacement|RMS     Displacement)\s+(\S+)\s+(\S+)\s+(YES|NO)/;
+  let cur = [];
+  lines.forEach((l,i) => { const x = l.match(convRe); if (x) { cur.push(x); if (cur.length === 4) { r.steps.push({line:i, ok: cur.every(v=>v[4]==="YES"), vals: cur.map(v=>v[2])}); cur = []; } } });
+  // Ignore the post-frequency re-check table that Gaussian prints after the optimization has finished
+  if (stat >= 0) r.steps = r.steps.filter(s => s.line < stat);
+  r.steps.forEach(s => { let k=-1; for(let j=0;j<scf.length;j++) if (scf[j].line < s.line) k=j; s.E = k>=0 ? scf[k].E : null; });
+
+  // Thermochemistry (last block)
+  const th = (re) => (m = last(re)) ? m[1] : null;
+  r.temp = th(/Temperature\s+(\d+\.\d+) Kelvin/);
+  r.thermo = {
+    "Zero-point correction": th(/Zero-point correction=\s+(-?\d+\.\d+)/),
+    "Thermal correction to Energy": th(/Thermal correction to Energy=\s+(-?\d+\.\d+)/),
+    "Thermal correction to Enthalpy": th(/Thermal correction to Enthalpy=\s+(-?\d+\.\d+)/),
+    "Thermal correction to Gibbs Free Energy": th(/Thermal correction to Gibbs Free Energy=\s+(-?\d+\.\d+)/),
+    "Sum of electronic and zero-point Energies": th(/Sum of electronic and zero-point Energies=\s+(-?\d+\.\d+)/),
+    "Sum of electronic and thermal Energies": th(/Sum of electronic and thermal Energies=\s+(-?\d+\.\d+)/),
+    "Sum of electronic and thermal Enthalpies": th(/Sum of electronic and thermal Enthalpies=\s+(-?\d+\.\d+)/),
+    "Sum of electronic and thermal Free Energies": th(/Sum of electronic and thermal Free Energies=\s+(-?\d+\.\d+)/)
+  };
+
+  // Frequencies
+  const freqs = [];
+  lines.forEach(l => { if (/^\s*Frequencies --/.test(l)) l.split("--")[1].trim().split(/\s+/).forEach(v => freqs.push(parseFloat(v))); });
+  r.nFreq = freqs.length;
+  r.lowFreq = freqs.length ? Math.min(...freqs) : null;
+  r.nImag = freqs.filter(f => f < 0).length;
+  if (r.nImag > 0) r.warnings.push(r.nImag + " imaginary frequenc" + (r.nImag===1?"y":"ies") + " found. This is not a minimum.");
+
+  // Dipole (last)
+  r.dipole = (m = last(/Tot=\s+(\d+\.\d+)/)) ? m[1] : null;
+
+  // HOMO / LUMO (alpha orbitals, last block)
+  let homo=null, lumo=null;
+  for (let i=0;i<lines.length;i++) {
+    if (/Alpha  occ\. eigenvalues/.test(lines[i]) && !/Alpha  occ\. eigenvalues/.test(lines[i+1]||"")) {
+      const occ = lines[i].split("--")[1].match(/-?\d+\.\d+/g);
+      let j = i+1; while (j<lines.length && !/Alpha virt\. eigenvalues/.test(lines[j])) j++;
+      if (j<lines.length) { homo = parseFloat(occ[occ.length-1]); lumo = parseFloat(lines[j].split("--")[1].match(/-?\d+\.\d+/)[0]); }
+    }
+  }
+  r.homo = homo; r.lumo = lumo;
+
+  // Spin: only printed for open-shell (UHF/UDFT) jobs
+  { const mu = parseInt(r.mult,10); if (!isNaN(mu)) { r.Sideal = (mu - 1) / 2; r.s2ideal = r.Sideal * (r.Sideal + 1); } }
+  const sp = last(/S\*\*2 before annihilation\s+(-?\d+\.\d+),\s+after\s+(-?\d+\.\d+)/);
+  if (sp) {
+    r.s2before = parseFloat(sp[1]); r.s2after = parseFloat(sp[2]);
+    const Sid = (parseInt(r.mult,10) - 1) / 2; r.s2ideal = Sid*(Sid+1);
+    r.Sval = (-1 + Math.sqrt(1 + 4*r.s2after)) / 2;
+    const dev = r.s2ideal > 0 ? (r.s2after - r.s2ideal)/r.s2ideal : r.s2after;
+    if (Math.abs(dev) > 0.1) r.warnings.push("Possible spin contamination: <S**2> = " + sp[2] + " vs ideal " + r.s2ideal.toFixed(4) + ".");
+  }
+  // System info
+  r.version = (m = last(/(Gaussian \d+, Revision [\w.]+),/)) ? m[1] : null;
+  r.nAtoms = (m = last(/NAtoms=\s+(\d+)/)) ? m[1] : null;
+  r.nBasis = (m = last(/(\d+) basis functions,/)) ? m[1] : null;
+  r.elec = (m = last(/(\d+) alpha electrons\s+(\d+) beta electrons/)) ? m[1]+" alpha / "+m[2]+" beta" : null;
+  r.mass = (m = last(/Molecular mass:\s+(\d+\.\d+) amu/)) ? m[1] : null;
+  r.rot = (m = last(/Rotational constants \(GHZ\):\s+(.+)/)) ? m[1].trim().split(/\s+/).join(", ") : null;
+  const tsum = (label) => { let t = 0, f = false; allLines.forEach(l => { const x = l.match(new RegExp(label + ":\\s+(\\d+) days\\s+(\\d+) hours\\s+(\\d+) minutes\\s+([\\d.]+) seconds")); if (x) { f = true; t += ((+x[1]*24 + +x[2])*60 + +x[3])*60 + parseFloat(x[4]); } }); return f ? t : null; };
+  r.cpu = tsum("Job cpu time"); r.wall = tsum("Elapsed time");
+
+  // Final geometry (last standard orientation)
+  const SYM = "X H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr".split(" ");
+  r.geom = [];
+  let go = -1; lines.forEach((l,i) => { if (/Standard orientation:/.test(l)) go = i; });
+  if (go >= 0) for (let i = go+5; i < lines.length && !/^\s*-{5,}/.test(lines[i]); i++) {
+    const x = lines[i].trim().split(/\s+/); if (x.length >= 6) r.geom.push([SYM[+x[1]] || "Z="+x[1], x[3], x[4], x[5]]);
+  }
+  // Mulliken charges (last block)
+  r.charges = [];
+  let mi = -1; lines.forEach((l,i) => { if (/^\s*Mulliken charges:/.test(l)) mi = i; });
+  if (mi >= 0) for (let i = mi+1; i < lines.length && !/Sum of Mulliken/.test(lines[i]); i++) {
+    const x = lines[i].match(/^\s+(\d+)\s+([A-Za-z]+)\s+(-?\d+\.\d+)/); if (x) r.charges.push([x[1], x[2], x[3]]);
+  }
+  // IR intensities (same order as frequencies)
+  r.freqs = freqs; r.ir = [];
+  lines.forEach(l => { if (/^\s*IR Inten\s+--/.test(l)) l.split("--")[1].trim().split(/\s+/).forEach(v => r.ir.push(v)); });
+
+  r.nTerm = allLines.filter(l => /Normal termination of Gaussian/.test(l)).length;
+  r.errTerm = allLines.some(l => /Error termination/.test(l));
+  if (r.errTerm) r.warnings.push("Gaussian reported an error termination.");
+
+  // ---- Method detection ----
+  const rt = r.route || "";
+  const fnName = r.fn || (scf.length ? scf[scf.length-1].fn : null);
+  r.openShell = !!(fnName && /^(U|RO)/.test(fnName));
+  r.ref = !fnName ? null : /^RO/.test(fnName) ? "Restricted open-shell" : /^U/.test(fnName) ? "Unrestricted (open-shell)" : "Restricted (closed-shell)";
+  const mp2 = last(/EUMP2\s*=\s*(-?\d\.\d+)D([+-]\d+)/);
+  r.mp2 = mp2 ? (parseFloat(mp2[1]) * Math.pow(10, parseInt(mp2[2],10))).toFixed(9) : null;
+  r.mtype = r.mp2 ? "MP2" : !fnName ? null : /^(R|U|RO)?HF$/.test(fnName) ? "HF" : "DFT";
+  const tok = rt.split(/\s+/).map(t => t.replace(/^#/, "")).find(t => /^[A-Za-z][\w\-+*]*\/\S+$/.test(t));
+  r.basis = tok ? tok.split("/").slice(1).join("/") : null;
+  if (r.basis && /^gen/i.test(r.basis)) { const gs = first(/General basis read from cards:\s+(\(\w+, \w+\))/); r.basis += " (custom basis read from input" + (gs ? ", " + gs[1] : "") + ")"; }
+  r.scfOpt = (m = rt.match(/\bscf\s*=\s*\(?([^)\s]+)/i)) ? m[1] : null;
+  r.disp = (m = rt.match(/empiricaldispersion\s*=\s*(\w+)/i)) ? m[1] : null;
+  r.solv = (m = rt.match(/scrf\s*=\s*\(?([^)\s]+)/i)) ? m[1] : null;
+  r.grid = (m = rt.match(/\bint(?:egral)?\s*=\s*\(?([^)\s]+)/i)) ? m[1] : null;
+  r.virial = (m = last(/-V\/T=\s+(\d+\.\d+)/)) ? m[1] : null;
+  r.nA = (m = last(/(\d+) alpha electrons\s+(\d+) beta electrons/)) ? +m[1] : null;
+  r.nB = m ? +m[2] : null;
+
+  // ---- Validation checks ----
+  const C = r.checks = [];
+  const add = (label, status, detail) => C.push({label, status, detail});
+  const wantOpt = /\bopt/i.test(rt), wantFreq = /\bfreq/i.test(rt), isTS = /\bts\b/i.test(rt);
+  const nJobs = lines.filter(l => /^ #\S*\s/.test(l)).length || 1;
+  add("Normal termination", r.nTerm >= nJobs ? "ok" : "bad", r.nTerm + " of " + nJobs + " job step(s) ended with 'Normal termination'");
+  const errRe = /Error termination|Convergence failure|SCF has not converged|Segmentation|forrtl|Out of memory|galloc|Inaccurate quadrature/i;
+  const errLine = allLines.find(l => errRe.test(l));
+  add("No error messages", errLine ? "bad" : "ok", errLine ? errLine.trim() : "No errors or convergence failures found");
+  add("SCF energy found", scf.length ? "ok" : "bad", scf.length + " 'SCF Done' line(s)");
+  if (wantOpt) {
+    add("Optimization converged", r.optConverged ? "ok" : "bad", r.optConverged ? "'Stationary point found' reported" : "No 'Stationary point found' line");
+    const ls = r.steps[r.steps.length-1];
+    if (ls) add("All 4 convergence criteria met at final step", ls.ok ? "ok" : "bad", ls.ok ? "Max/RMS force and displacement all YES" : "At least one criterion is NO");
+    if (wantFreq && r.optConverged && scf.length) {
+      const lastE = scf[scf.length-1].E;
+      add("Frequency-job energy matches optimized energy", lastE === r.finalE ? "ok" : "warn", lastE === r.finalE ? "Same geometry and energy (" + r.finalE + ")" : "Opt " + r.finalE + " vs last SCF " + lastE);
+    }
+  }
+  if (wantFreq) {
+    add("Frequencies computed", r.nFreq ? "ok" : "bad", r.nFreq + " frequencies found");
+    const want = isTS ? 1 : 0;
+    add("Imaginary frequencies", r.nFreq && r.nImag === want ? "ok" : "bad", r.nImag + " found (expected " + want + (isTS ? ", transition state" : ", minimum") + ")");
+    add("Thermochemistry printed", r.thermo["Zero-point correction"] != null ? "ok" : "bad", r.thermo["Zero-point correction"] != null ? "Found at " + r.temp + " K" : "Missing");
+  }
+  if (r.nA != null && r.mult != null) add("Charge / multiplicity consistent with electrons", (r.nA - r.nB + 1) === parseInt(r.mult,10) ? "ok" : "bad", r.nA + " alpha, " + r.nB + " beta gives multiplicity " + (r.nA - r.nB + 1) + " (input " + r.mult + ")");
+  if (r.charges.length && r.charge != null) { const tot = r.charges.reduce((a,c) => a + parseFloat(c[2]), 0); add("Mulliken charges sum to total charge", Math.abs(tot - parseInt(r.charge,10)) < 0.01 ? "ok" : "warn", "Sum = " + tot.toFixed(4) + ", total charge " + r.charge); }
+  if (r.openShell) {
+    if (r.s2after == null) add("Spin contamination", "warn", "Open-shell job but no <S**2> found");
+    else { const dev = r.s2ideal > 0 ? (r.s2after - r.s2ideal) / r.s2ideal : r.s2after; add("Spin contamination", Math.abs(dev) > 0.1 ? "bad" : "ok", "<S**2> = " + r.s2after + ", ideal " + r.s2ideal.toFixed(4) + (r.s2ideal > 0 ? " (" + (dev*100).toFixed(1) + "% off)" : "")); }
+  } else add("Spin contamination", "na", "Closed-shell, not applicable");
+
+  // ---- Counterpoise ----
+  const lastA = (re) => { let mm = null; for (const l of allLines) { const x = l.match(re); if (x) mm = x; } return mm; };
+  r.isCP = /counterpoise/i.test(rt) || cpIdx > 0;
+  if (r.isCP) {
+    const g = (re) => (m = lastA(re)) ? m[1] : null;
+    r.cp = { corrE: g(/Counterpoise corrected energy =\s+(-?\d+\.\d+)/), bsse: g(/BSSE energy =\s+(-?\d+\.\d+)/), frag: g(/sum of fragments =\s+(-?\d+\.\d+)/),
+             raw: g(/complexation energy =\s+(-?\d+\.\d+) kcal\/mole \(raw\)/), cor: g(/complexation energy =\s+(-?\d+\.\d+) kcal\/mole \(corrected\)/) };
+    r.fragments = [];
+    allLines.forEach(l => { const x = l.match(/Charge =\s*(-?\d+) Multiplicity =\s*(\d+) in fragment\s+(\d+)/); if (x) r.fragments.push({n:x[3], charge:parseInt(x[1],10), mult:x[2]}); });
+    add("Counterpoise: all fragment calculations ran", scf.length >= 5 ? "ok" : "bad", scf.length + " SCF energies found (2 fragments need 5)");
+    add("Counterpoise: summary printed", r.cp.corrE && r.cp.cor ? "ok" : "bad", r.cp.corrE ? "Corrected energy, BSSE and complexation energies found" : "Summary lines missing");
+    if (r.fragments.length && r.charge != null) { const sc = r.fragments.reduce((a,f) => a + f.charge, 0); add("Fragment charges sum to total charge", sc === parseInt(r.charge,10) ? "ok" : "bad", "Fragments sum to " + sc + ", total charge " + r.charge); }
+    if (r.cp.bsse) { const bk = Math.abs(parseFloat(r.cp.bsse)) * 627.5095; add("BSSE size", bk > 1 ? "warn" : "ok", bk.toFixed(2) + " kcal/mol" + (bk > 1 ? " (large: basis set may be too small)" : "")); }
+  }
+  r.nuc = (m = first(/nuclear repulsion energy\s+(\d+\.\d+) Hartrees/)) ? m[1] : null;
+  r.wantOpt = wantOpt;
+  if (!wantOpt) add("Geometry optimization", "na", "Not requested (no 'opt' in route): geometry used as given");
+  if (!wantFreq) add("Frequencies / thermochemistry", "na", "Not requested (no 'freq' in route)");
+
+  // ---- Job type and "was it calculated?" list ----
+  const bare = (r.fn || "").replace(/^(R|U|RO)(?=.)/, "");
+  const jt = [wantOpt && "Geometry optimization", wantFreq && "Frequencies", r.isCP && "Counterpoise (BSSE)", /\bscan\b/i.test(rt) && "Scan", /\birc\b/i.test(rt) && "IRC", /\btd\b|\btd=|\btd\(/i.test(rt) && "Excited states (TD)", /\bnmr/i.test(rt) && "NMR"].filter(Boolean);
+  r.jobType = jt.length ? jt.join(" + ") : "Single-point energy";
+  const dispOn = !!r.disp || /wB97XD|-D\d?|D3|D4/i.test(rt + " " + bare);
+  r.scope = [
+    ["Geometry optimization", wantOpt, wantOpt ? (r.optConverged ? "Converged" : "Did NOT converge") : "Single point at the input geometry"],
+    ["Frequencies", wantFreq, wantFreq ? r.nFreq + " modes, " + r.nImag + " imaginary" : "No 'freq' keyword"],
+    ["Thermochemistry (ZPE, H, G)", wantFreq && r.thermo["Zero-point correction"] != null, wantFreq ? "At " + r.temp + " K" : "Needs a frequency calculation"],
+    ["IR intensities", r.ir.length > 0, r.ir.length ? "" : "Needs a frequency calculation"],
+    ["Counterpoise (BSSE) correction", r.isCP, r.isCP ? "Counterpoise=" + (rt.match(/counterpoise\s*=\s*(\d+)/i) || [,"?"])[1] : "Not requested"],
+    ["Solvation model", !!r.solv, r.solv || "Gas phase (no SCRF keyword)"],
+    ["Dispersion correction", dispOn, dispOn ? (r.disp || "Part of the functional") : "None (not in route or functional)"],
+    ["Excited states (TD)", /\btd\b|\btd=|\btd\(/i.test(rt), "No TD keyword"],
+    ["NMR shieldings", /\bnmr/i.test(rt), "No NMR keyword"],
+    ["Mulliken population analysis", r.charges.length > 0, r.charges.length ? "" : "Not printed"],
+    ["Open-shell / spin (<S**2>)", r.openShell, r.openShell ? "Unrestricted reference" : "Closed-shell reference"]
+  ];
+
+  const AVG = {H:1.008,He:4.0026,Li:6.94,Be:9.0122,B:10.81,C:12.011,N:14.007,O:15.999,F:18.998,Ne:20.180,Na:22.990,Mg:24.305,Al:26.982,Si:28.085,P:30.974,S:32.06,Cl:35.45,Ar:39.948,K:39.098,Ca:40.078,Sc:44.956,Ti:47.867,V:50.942,Cr:51.996,Mn:54.938,Fe:55.845,Co:58.933,Ni:58.693,Cu:63.546,Zn:65.38,Ga:69.723,Ge:72.630,As:74.922,Se:78.971,Br:79.904,Kr:83.798};
+  r.avgMass = r.geom.length && r.geom.every(a => AVG[a[0]]) ? r.geom.reduce((t,a) => t + AVG[a[0]], 0).toFixed(3) : null;
+  // ---- Bond lengths and short contacts from the final geometry ----
+  const RAD = {H:.31,Li:1.28,Be:.96,B:.84,C:.76,N:.71,O:.66,F:.57,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,K:2.03,Ca:1.76,Br:1.2,I:1.39};
+  const G = r.geom, nb = G.map(() => new Set()), pairs = [];
+  for (let i = 0; i < G.length; i++) for (let j = i+1; j < G.length; j++) {
+    const d = Math.hypot(G[i][1]-G[j][1], G[i][2]-G[j][2], G[i][3]-G[j][3]);
+    const bonded = d <= 1.3 * ((RAD[G[i][0]]||1.5) + (RAD[G[j][0]]||1.5));
+    if (bonded) { nb[i].add(j); nb[j].add(i); }
+    pairs.push({i, j, d, bonded});
+  }
+  const nm = (k) => G[k][0] + (k+1);
+  r.bonds = pairs.filter(p => p.bonded).sort((a,b) => a.d-b.d).slice(0,40).map(p => [nm(p.i) + "–" + nm(p.j), p.d.toFixed(4)]);
+  r.contacts = pairs.filter(p => !p.bonded && p.d <= 3.2 && ![...nb[p.i]].some(k => nb[p.j].has(k))).sort((a,b) => a.d-b.d).slice(0,12).map(p => [nm(p.i) + "···" + nm(p.j), p.d.toFixed(4)]);
+  return r;
+}
+// PARSE_END
+
+const HARTREE_EV = 27.211386;
+const fmtT = t => t==null ? "n/a" : (t>=60 ? Math.floor(t/60)+" min " : "") + (t%60).toFixed(1) + " s";
+const $ = id => document.getElementById(id);
+
+function render(r){
+  const out = $("out"); out.textContent = "";
+  const add = (tag, text, cls) => { const e = document.createElement(tag); if (text!=null) e.textContent = text; if (cls) e.className = cls; return e; };
+  const table = (head, rows, hlRow) => {
+    const w = add("div",null,"wrap"), t = add("table"), tr = add("tr");
+    head.forEach(h => tr.appendChild(add("th", h))); t.appendChild(tr);
+    rows.forEach((row,ri) => { const x = add("tr", null, ri===hlRow ? "hl" : ""); row.forEach((c,ci) => x.appendChild(add("td", c==null?"✗ not in this calculation":c, ci>0 && /^-?[\d.]+$/.test(String(c)) ? "n" : ""))); t.appendChild(x); });
+    w.appendChild(t); return w;
+  };
+  const nBad = r.checks.filter(c => c.status==="bad").length, nWarn = r.checks.filter(c => c.status==="warn").length;
+  out.appendChild(add("div", nBad ? "✗ " + nBad + " check" + (nBad>1?"s":"") + " FAILED. Do not trust these results until resolved." : nWarn ? "⚠ Passed, with " + nWarn + " warning" + (nWarn>1?"s":"") : "✓ All checks passed", "banner " + (nBad ? "bad" : nWarn ? "warn" : "ok")));
+  { const w = add("div",null,"wrap"), t = add("table"), hr = add("tr"); ["","Check","Detail"].forEach(h => hr.appendChild(add("th",h))); t.appendChild(hr);
+    const sym = {ok:"✓",bad:"✗",warn:"⚠",na:"–"};
+    r.checks.forEach(c => { const x = add("tr"); x.appendChild(add("td", sym[c.status], "ck " + c.status)); x.appendChild(add("td", c.label, c.status==="ok"||c.status==="na" ? "" : "ck " + c.status)); x.appendChild(add("td", c.detail)); t.appendChild(x); });
+    w.appendChild(t); out.appendChild(w); }
+  out.appendChild(add("h2","What was (and was not) calculated"));
+  out.appendChild(table(["Item","Calculated?","Note"], r.scope.map(x => [x[0], x[1] ? "✓ Yes" : "✗ No", x[2]])));
+
+  out.appendChild(add("h2","Summary"));
+  const ev = (x) => x==null ? null : (x*HARTREE_EV).toFixed(3);
+  const rows = [
+    ["Job type", r.jobType], ["Stoichiometry", r.stoich], ["Charge / multiplicity", r.charge!=null ? r.charge+" / "+r.mult : null],
+    ["Method / job", r.route], ["Point group (final geometry)", r.pointGroup],
+    ["Optimization converged", r.wantOpt ? (r.optConverged ? "Yes" : "No") : null],
+    [(r.wantOpt ? "Final optimized" : r.isCP ? "Supermolecule" : "Single-point") + " SCF energy (" + (r.fn||"?") + ", Hartree)", r.finalE],
+    ["Nuclear repulsion energy (Hartree)", r.nuc],
+    ["Lowest frequency (cm⁻¹)", r.lowFreq==null?null:r.lowFreq.toFixed(4)],
+    ["Imaginary frequencies", r.nFreq ? String(r.nImag) : null],
+    ["Dipole moment (Debye)", r.dipole],
+    ["HOMO (Hartree / eV)", r.homo==null?null:r.homo.toFixed(5)+" / "+ev(r.homo)],
+    ["LUMO (Hartree / eV)", r.lumo==null?null:r.lumo.toFixed(5)+" / "+ev(r.lumo)],
+    ["HOMO–LUMO gap (eV)", r.homo==null?null:ev(r.lumo-r.homo)],
+    ["Atoms / basis functions", r.nAtoms ? r.nAtoms + " / " + r.nBasis : null],
+    ["Electrons", r.elec], ["Molecular mass, as Gaussian prints it (amu, most-abundant isotopes; freq jobs only)", r.mass], ["Formula weight, average atomic masses (g/mol)", r.avgMass], ["Rotational constants (GHz)", r.rot],
+    ["<S**2> before / after annihilation", r.s2after==null ? "n/a (closed-shell, not printed)" : r.s2before + " / " + r.s2after],
+    ["Ideal <S**2> for this multiplicity", r.s2ideal==null?null:r.s2ideal.toFixed(4)],
+    ["Ideal S for this multiplicity", r.Sideal==null?null:r.Sideal.toFixed(1)],
+    ["S (from <S**2> after annihilation)", r.Sval==null?null:r.Sval.toFixed(4)],
+    ["Gaussian version", r.version],
+    ["CPU time / wall time", r.cpu==null?null:fmtT(r.cpu) + " / " + fmtT(r.wall)],
+    ["Normal terminations", String(r.nTerm)]
+  ];
+  out.appendChild(table(["Property","Value"], rows));
+
+  if (r.mtype) {
+    const bare = (r.fn||"").replace(/^(R|U|RO)(?=.)/, "");
+    const eta = r.homo==null ? null : ((r.lumo - r.homo)/2*HARTREE_EV).toFixed(3), mu = r.homo==null ? null : ((r.lumo + r.homo)/2*HARTREE_EV).toFixed(3);
+    let title, mrows;
+    if (r.mtype === "HF") {
+      title = "Hartree–Fock (" + r.fn + ")";
+      mrows = [["Basis set", r.basis], ["Reference", r.ref], ["Koopmans' IP ≈ −E(HOMO) (eV)", r.homo==null?null:ev(-r.homo)], ["Virial ratio −V/T (ideal 2)", r.virial], ["Note", "No electron correlation; energies are only comparable at the same basis set"]];
+    } else if (r.mtype === "DFT") {
+      title = "DFT (" + bare + ")";
+      mrows = [["Functional", bare], ["Basis set", r.basis], ["Reference", r.ref], ["Dispersion", r.disp || (/D\d?$|-D/i.test(bare) ? "included in functional (" + bare + ")" : "none specified")], ["Solvation", r.solv || "gas phase (none specified)"], ["Integration grid", r.grid || "default (not specified)"], ["Chemical potential μ = (ε_HOMO+ε_LUMO)/2 (eV)", mu], ["Hardness η = (ε_LUMO−ε_HOMO)/2 (eV)", eta], ["Virial ratio −V/T", r.virial], ["Note", "Kohn–Sham orbital energies are approximate; compare energies only with the same functional, basis, and grid"]];
+    } else {
+      title = "MP2 (reference: " + r.fn + ")";
+      const hf = r.scf.length ? r.scf[r.scf.length-1].E : null;
+      mrows = [["Basis set", r.basis], ["Reference", r.ref], ["MP2 total energy, EUMP2 (Hartree)", r.mp2], ["Correlation energy, MP2 − HF (Hartree)", hf ? (parseFloat(r.mp2) - parseFloat(hf)).toFixed(9) : null]];
+    }
+    mrows.splice(2, 0, ["SCF options (route)", r.scfOpt || "default"]);
+    out.appendChild(add("h2","Method-specific: " + title));
+    out.appendChild(table(["Property","Value"], mrows));
+  }
+
+  if (r.isCP && r.cp) {
+    const kc = (h) => h==null ? null : (parseFloat(h)*627.5095).toFixed(3);
+    out.appendChild(add("h2","Counterpoise (BSSE) results"));
+    out.appendChild(table(["Quantity","Value"], [["Counterpoise-corrected energy (Hartree)", r.cp.corrE], ["Sum of fragments (Hartree)", r.cp.frag], ["BSSE energy (Hartree)", r.cp.bsse], ["BSSE energy (kcal/mol)", kc(r.cp.bsse)], ["Complexation energy, raw (kcal/mol)", r.cp.raw], ["Complexation energy, corrected (kcal/mol)", r.cp.cor]]));
+    out.appendChild(add("h2","Counterpoise calculations (energies in Hartree)"));
+    out.appendChild(table(["#","Calculation","Basis functions","Energy","SCF cycles"], r.scf.map((x,i)=>[String(i+1), x.label, x.nb, x.E, x.cycles]), 0));
+  }
+
+  if (r.thermo && Object.values(r.thermo).some(v=>v!=null)) {
+    out.appendChild(add("h2","Thermochemistry (Hartree/particle, " + (r.temp||"?") + " K)"));
+    out.appendChild(table(["Quantity","Value"], Object.entries(r.thermo)));
+  }
+
+  if (r.steps.length) {
+    out.appendChild(add("h2","Optimization steps"));
+    out.appendChild(table(["Step","Energy (Hartree)","ΔE (Hartree)","Max force","RMS force","Max disp.","RMS disp.","Converged"],
+      r.steps.map((s,i)=>[String(i+1), s.E, i && s.E ? (parseFloat(s.E)-parseFloat(r.steps[i-1].E)).toFixed(9) : "-", ...s.vals, s.ok?"YES":"NO"]), r.steps.length-1));
+  } else if (r.scf.length && !r.isCP) {
+    out.appendChild(add("h2","SCF energies"));
+    out.appendChild(table(["#","Energy (Hartree)","SCF cycles"], r.scf.map((s,i)=>[String(i+1), s.E, s.cycles]), r.finalIdx));
+  }
+  if (r.geom.length) { out.appendChild(add("h2", r.wantOpt ? "Final geometry (standard orientation, Å)" : "Geometry as input, not optimized (standard orientation, Å)")); out.appendChild(table(["Atom","X","Y","Z"], r.geom)); }
+  if (r.bonds.length) { out.appendChild(add("h2","Bond lengths (Å)")); out.appendChild(table(["Atoms","Distance"], r.bonds)); }
+  if (r.contacts.length) { out.appendChild(add("h2","Other short contacts (non-bonded, < 3.2 Å)")); out.appendChild(table(["Atoms","Distance"], r.contacts)); }
+  if (r.charges.length) { out.appendChild(add("h2","Mulliken charges (final)")); out.appendChild(table(["#","Element","Charge"], r.charges)); }
+  if (r.freqs.length) { out.appendChild(add("h2","Vibrational frequencies")); out.appendChild(table(["Mode","Frequency (cm⁻¹)","IR intensity (km/mol)"], r.freqs.map((f,i)=>[String(i+1), f.toFixed(4), r.ir[i]!=null?r.ir[i]:null]))); }
+
+  const btn = add("button","Copy summary as tab-separated text");
+  btn.style.marginTop = "16px";
+  btn.onclick = () => { navigator.clipboard.writeText(rows.map(x=>x.map(v=>v==null?"":v).join("\t")).join("\n")); btn.textContent = "Copied"; };
+  out.appendChild(btn);
+}
+
+function load(file){ if (!file) return; const fr = new FileReader(); fr.onload = () => render(parseGaussian(fr.result)); fr.readAsText(file); }
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = e => load(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); load(e.dataTransfer.files[0]); };
+</script>
+</body>
+</html>
