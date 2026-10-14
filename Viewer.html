@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Gaussian Log Viewer</title>
 <style>
-:root{--bg:#fafaf8;--fg:#1f2328;--mut:#6b7280;--card:#fff;--bd:#d8dce0;--acc:#1a5fb4;--ok:#1a7f37;--bad:#c62828;--hl:#e8f1fb}
-@media (prefers-color-scheme:dark){:root{--bg:#17191c;--fg:#e6e8ea;--mut:#9aa1a9;--card:#1f2226;--bd:#3a3f45;--acc:#7ab0f5;--ok:#56d364;--bad:#ff7b72;--hl:#22364d}}
+:root{--bg:#fafaf8;--fg:#1f2328;--mut:#6b7280;--card:#fff;--bd:#d8dce0;--acc:#1a5fb4;--ok:#1a7f37;--bad:#c62828;--hl:#e8f1fb;--amber:#b26a00;--purple:#8250df}
+@media (prefers-color-scheme:dark){:root{--bg:#17191c;--fg:#e6e8ea;--mut:#9aa1a9;--card:#1f2226;--bd:#3a3f45;--acc:#7ab0f5;--ok:#56d364;--bad:#ff7b72;--hl:#22364d;--amber:#e3a008;--purple:#c297ff}}
 body{margin:0;padding:24px;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
-main{max-width:900px;margin:auto}
+main{max-width:1000px;margin:auto}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}
 p.sub{color:var(--mut);margin:0 0 16px}
 #drop{border:2px dashed var(--bd);border-radius:10px;padding:28px;text-align:center;background:var(--card);cursor:pointer}
@@ -22,6 +22,17 @@ tr.hl td{background:var(--hl);font-weight:600}
 .warn{color:var(--bad)}.good{color:var(--ok)}
 .ck{font-weight:600;white-space:nowrap}.ck.ok,.banner.ok{color:var(--ok)}.ck.bad,.banner.bad{color:var(--bad)}.ck.warn,.banner.warn{color:#b26a00}.ck.na{color:var(--mut)}.banner{font-size:17px;font-weight:700;margin:16px 0 4px}
 button{padding:6px 12px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
+.tabs{display:flex;gap:4px;margin:20px 0 8px;border-bottom:1px solid var(--bd)}
+button.tab{border:none;border-bottom:3px solid transparent;border-radius:0;background:none;padding:8px 18px;font-weight:600;color:var(--mut);font-size:15px}
+button.tab.on{color:var(--acc);border-bottom-color:var(--acc)}
+.ctrl{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:8px 0;font-size:14px}
+.ctrl label{display:flex;align-items:center;gap:6px}
+.ctrl input[type=number],.ctrl select{padding:4px 6px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg);font:inherit}
+.ctrl input[type=number]{width:76px}
+.chart{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:4px;margin:6px 0}
+.chart svg{display:block;width:100%;height:auto}
+.note{color:var(--mut);font-size:13px;margin:6px 0}
+td.l{white-space:nowrap}
 </style>
 </head>
 <body>
@@ -45,7 +56,7 @@ function parseGaussian(text){
   const routeIdx = lines.findIndex(l => /^\s*#/.test(l));
   if (routeIdx >= 0) {
     let route = lines[routeIdx].trim(), i = routeIdx + 1;
-    while (i < lines.length && !/^\s*-{5,}/.test(lines[i]) && lines[i].trim()) route += lines[i].trim(), i++;
+    while (i < lines.length && !/^\s*-{5,}/.test(lines[i]) && lines[i].trim()) route += " " + lines[i].trim(), i++;
     r.route = route;
   }
   let m;
@@ -56,12 +67,14 @@ function parseGaussian(text){
 
   // SCF energies: keep every "SCF Done", remember the line number
   const scf = [];
-  let curLabel = "", curNb = null;
+  let curLabel = "", curNb = null, trace = [];
   allLines.forEach((l,i) => {
     let y = l.match(/Counterpoise: doing (.*)/); if (y) curLabel = y[1].replace(/^calculation for /, "").replace(/, NewBq=T/, "").replace(/\.$/, "").replace(/\s+/g, " ").trim();
     y = l.match(/(\d+) basis functions,/); if (y) curNb = y[1];
+    y = l.match(/^\s*E=\s+(-?\d+\.\d+)(?:\s+Delta-E=\s+(-?\d+\.\d+))?/); if (y) trace.push({E:parseFloat(y[1]), dE:y[2] != null ? parseFloat(y[2]) : null, err:null});
+    y = l.match(/^\s*DIIS: error=\s*(\S+) at cycle/); if (y && trace.length) trace[trace.length-1].err = parseFloat(y[1].replace(/D/i, "e"));
     const x = l.match(/SCF Done:\s+E\((\S+)\)\s+=\s+(-?\d+\.\d+)\s+A\.U\. after\s+(\d+) cycles/);
-    if (x) scf.push({line:i, fn:x[1], E:x[2], cycles:x[3], label:curLabel, nb:curNb});
+    if (x) { scf.push({line:i, fn:x[1], E:x[2], cycles:x[3], label:curLabel, nb:curNb, trace}); trace = []; }
   });
   r.scf = scf;
 
@@ -80,7 +93,7 @@ function parseGaussian(text){
   r.steps = [];
   const convRe = /^\s*(Maximum Force|RMS     Force|Maximum Displacement|RMS     Displacement)\s+(\S+)\s+(\S+)\s+(YES|NO)/;
   let cur = [];
-  lines.forEach((l,i) => { const x = l.match(convRe); if (x) { cur.push(x); if (cur.length === 4) { r.steps.push({line:i, ok: cur.every(v=>v[4]==="YES"), vals: cur.map(v=>v[2])}); cur = []; } } });
+  lines.forEach((l,i) => { const x = l.match(convRe); if (x) { cur.push(x); if (cur.length === 4) { r.steps.push({line:i, ok: cur.every(v=>v[4]==="YES"), vals: cur.map(v=>v[2]), thr: cur.map(v=>v[3])}); cur = []; } } });
   // Ignore the post-frequency re-check table that Gaussian prints after the optimization has finished
   if (stat >= 0) r.steps = r.steps.filter(s => s.line < stat);
   r.steps.forEach(s => { let k=-1; for(let j=0;j<scf.length;j++) if (scf[j].line < s.line) k=j; s.E = k>=0 ? scf[k].E : null; });
@@ -181,6 +194,42 @@ function parseGaussian(text){
   r.nA = (m = last(/(\d+) alpha electrons\s+(\d+) beta electrons/)) ? +m[1] : null;
   r.nB = m ? +m[2] : null;
 
+  // ---- Excited states (TD-DFT / TD-HF / CIS): last "Excitation energies" block ----
+  r.td = null;
+  { let sI = -1; lines.forEach((l,i) => { if (/Excitation energies and oscillator strengths:/.test(l)) sI = i; });
+    if (sI >= 0) {
+      const states = []; let curS = null;
+      for (let i = sI+1; i < lines.length; i++) {
+        const l = lines[i];
+        let x = l.match(/^\s*Excited State\s+(\d+):\s+(\S+)\s+(-?\d+\.\d+) eV\s+(\d+\.\d+) nm\s+f=(\d+\.\d+)\s+<S\*\*2>=(-?\d+\.\d+)/);
+        if (x) { curS = {n:+x[1], sym:x[2], eV:parseFloat(x[3]), nm:parseFloat(x[4]), f:parseFloat(x[5]), s2:parseFloat(x[6]), tr:[], E:null}; states.push(curS); continue; }
+        x = l.match(/^\s+(\d+)([AB]?)\s*(->|<-)\s*(\d+)([AB]?)\s+(-?\d+\.\d+)\s*$/);
+        if (x && curS) { curS.tr.push({from:+x[1], to:+x[4], back:x[3]==="<-", spin:x[2]||null, c:parseFloat(x[6])}); continue; }
+        x = l.match(/Total Energy, E\(TD-HF\/TD-DFT\)\s*=\s*(-?\d+\.\d+)/);
+        if (x && curS) { curS.E = x[1]; continue; }
+        if (!l.trim() || /^\s*(This state for optimization|Copying the excited)/.test(l)) continue;
+        if (states.length) break;
+      }
+      if (states.length) {
+        const req = rt.match(/nstates\s*=\s*(\d+)/i);
+        r.td = {states, req: req && !/50-50/i.test(rt) ? +req[1] : null, neq: lines.some(l => /NEqPCM:\s+Using non-equilibrium solvation/.test(l)),
+                root: states.find(q => q.E != null) || null};
+      }
+    }
+  }
+  // ---- Alpha orbital energies (last block) ----
+  r.orb = null;
+  { let blk = null, prev = "";
+    lines.forEach(l => {
+      const o = /^\s*Alpha\s+occ\. eigenvalues --/.test(l), v = /^\s*Alpha\s+virt\. eigenvalues --/.test(l);
+      if (o || v) {
+        if (o && !/^\s*Alpha\s+occ\. eigenvalues --/.test(prev)) blk = {occ:[], virt:[]};
+        if (blk) (o ? blk.occ : blk.virt).push(...(l.split("--")[1].match(/-?\d+\.\d{5}/g) || []).map(Number));
+      }
+      prev = l;
+    });
+    if (blk && blk.occ.length) r.orb = blk; }
+
   // ---- Validation checks ----
   const C = r.checks = [];
   const add = (label, status, detail) => C.push({label, status, detail});
@@ -191,6 +240,17 @@ function parseGaussian(text){
   const errLine = allLines.find(l => errRe.test(l));
   add("No error messages", errLine ? "bad" : "ok", errLine ? errLine.trim() : "No errors or convergence failures found");
   add("SCF energy found", scf.length ? "ok" : "bad", scf.length + " 'SCF Done' line(s)");
+  const wantTD = /\btd\b/i.test(rt);
+  if (wantTD) {
+    const T = r.td;
+    add("Excited states computed", T ? "ok" : "bad", T ? T.states.length + " states found" : "No 'Excitation energies' block in the log");
+    if (T) {
+      if (T.req) add("Requested number of states returned", T.states.length >= T.req ? "ok" : "bad", T.states.length + " found, " + T.req + " requested");
+      const eHi = Math.max(...T.states.map(q => q.eV)), eLo = Math.min(...T.states.map(q => q.eV)), nmHi = 1239.84198 / eHi;
+      add("States reach the far-UV edge of interest (≤ 250 nm)", nmHi <= 250 ? "ok" : "warn", "Highest computed state: " + eHi.toFixed(3) + " eV (" + nmHi.toFixed(0) + " nm)" + (nmHi > 250 ? ". Bands at shorter wavelength are not in the spectrum; increase nstates." : ""));
+      if (eLo < 1.0) add("Lowest excitation energy is plausible", "warn", "Lowest state is only " + eLo.toFixed(3) + " eV (" + (1239.84198/eLo).toFixed(0) + " nm). Unusually low for a closed-shell molecule; check the geometry (opt + freq first) and wavefunction stability.");
+    }
+  }
   if (wantOpt) {
     add("Optimization converged", r.optConverged ? "ok" : "bad", r.optConverged ? "'Stationary point found' reported" : "No 'Stationary point found' line");
     const ls = r.steps[r.steps.length-1];
@@ -245,7 +305,9 @@ function parseGaussian(text){
     ["Counterpoise (BSSE) correction", r.isCP, r.isCP ? "Counterpoise=" + (rt.match(/counterpoise\s*=\s*(\d+)/i) || [,"?"])[1] : "Not requested"],
     ["Solvation model", !!r.solv, r.solv || "Gas phase (no SCRF keyword)"],
     ["Dispersion correction", dispOn, dispOn ? (r.disp || "Part of the functional") : "None (not in route or functional)"],
-    ["Excited states (TD)", /\btd\b|\btd=|\btd\(/i.test(rt), "No TD keyword"],
+    ["Excited states (TD)", wantTD, wantTD ? (r.td ? r.td.states.length + " states, " + Math.min(...r.td.states.map(q=>q.eV)).toFixed(3) + "–" + Math.max(...r.td.states.map(q=>q.eV)).toFixed(3) + " eV" : "TD requested but no states found") : "No TD keyword"],
+    ["UV-Vis spectrum (Graphs tab)", !!r.td, r.td ? "Built from the TD oscillator strengths" : "Needs a TD calculation"],
+    ["Orbital energies (alpha)", !!r.orb, r.orb ? r.orb.occ.length + " occupied, " + r.orb.virt.length + " virtual" : "Not printed"],
     ["NMR shieldings", /\bnmr/i.test(rt), "No NMR keyword"],
     ["Mulliken population analysis", r.charges.length > 0, r.charges.length ? "" : "Not printed"],
     ["Open-shell / spin (<S**2>)", r.openShell, r.openShell ? "Unrestricted reference" : "Closed-shell reference"]
@@ -274,7 +336,8 @@ const fmtT = t => t==null ? "n/a" : (t>=60 ? Math.floor(t/60)+" min " : "") + (t
 const $ = id => document.getElementById(id);
 
 function render(r){
-  const out = $("out"); out.textContent = "";
+  const root = $("out"); root.textContent = "";
+  const out = document.createElement("div"), gr = document.createElement("div");
   const add = (tag, text, cls) => { const e = document.createElement(tag); if (text!=null) e.textContent = text; if (cls) e.className = cls; return e; };
   const table = (head, rows, hlRow) => {
     const w = add("div",null,"wrap"), t = add("table"), tr = add("tr");
@@ -337,6 +400,35 @@ function render(r){
     out.appendChild(table(["Property","Value"], mrows));
   }
 
+  const nOcc = (r.orb && r.orb.occ.length) || r.nA;
+  if (r.orb && nOcc) {
+    const all = r.orb.occ.concat(r.orb.virt), hi = Math.min(all.length, nOcc + 6), lo = Math.max(1, nOcc - 5), orows = [];
+    for (let n = hi; n >= lo; n--) orows.push([orbLabel(n, nOcc), String(n), all[n-1].toFixed(5), (all[n-1]*HARTREE_EV).toFixed(3)]);
+    out.appendChild(add("h2","Frontier orbitals (alpha)"));
+    out.appendChild(table(["Orbital","Number","Energy (Hartree)","Energy (eV)"], orows));
+  }
+  if (r.td) {
+    const st = r.td.states, fmax = Math.max(...st.map(q => q.f)), best = st.findIndex(q => q.f === fmax), bs = st[best];
+    const pct = c => (r.openShell ? c*c : 2*c*c) * 100;
+    const fmtTr = q => { const t = q.tr.slice().sort((a,b) => Math.abs(b.c) - Math.abs(a.c)).slice(0, 3);
+      return t.map(x => orbLabel(x.from, nOcc) + (x.back ? " ← " : " → ") + orbLabel(x.to, nOcc) + " (" + pct(x.c).toFixed(0) + "%)").join("; "); };
+    out.appendChild(add("h2","Excited states (TD)"));
+    out.appendChild(table(["Property","Value"], [
+      ["Number of states computed", st.length + (r.td.req ? " (requested " + r.td.req + ")" : "")],
+      ["Spin manifold", [...new Set(st.map(q => q.sym.split("-")[0]))].join(", ")],
+      ["Excitation energy range (eV)", Math.min(...st.map(q => q.eV)).toFixed(4) + " – " + Math.max(...st.map(q => q.eV)).toFixed(4)],
+      ["Wavelength range (nm)", Math.min(...st.map(q => q.nm)).toFixed(2) + " – " + Math.max(...st.map(q => q.nm)).toFixed(2)],
+      ["Strongest transition", fmax > 0 ? "State " + bs.n + " (" + bs.sym + "): " + bs.nm.toFixed(1) + " nm, " + bs.eV.toFixed(3) + " eV, f = " + bs.f.toFixed(4) : "No state with f > 0"],
+      ["Bright states (f ≥ 0.001)", String(st.filter(q => q.f >= 0.001).length)],
+      ["Excited-state solvation", r.td.neq ? "Non-equilibrium PCM (linear response)" : (r.solv ? "see route" : "gas phase")],
+      ["Total energy of followed state (Hartree)", r.td.root ? r.td.root.E + " (State " + r.td.root.n + ")" : null]
+    ]));
+    out.appendChild(add("h2","Excited states: energies, oscillator strengths, main orbital contributions"));
+    out.appendChild(table(["State","Symmetry","Energy (eV)","λ (nm)","f","Main contributions (top 3)"],
+      st.map(q => [String(q.n), q.sym, q.eV.toFixed(4), q.nm.toFixed(2), q.f.toFixed(4), fmtTr(q)]), fmax > 0 ? best : -1));
+    out.appendChild(add("p","The highlighted row is the strongest absorber. Percentages are 2c² for closed-shell references (c² for open-shell); orbital numbers: HOMO = " + nOcc + ". The spectrum is on the Graphs tab.","note"));
+  }
+
   if (r.isCP && r.cp) {
     const kc = (h) => h==null ? null : (parseFloat(h)*627.5095).toFixed(3);
     out.appendChild(add("h2","Counterpoise (BSSE) results"));
@@ -368,6 +460,194 @@ function render(r){
   btn.style.marginTop = "16px";
   btn.onclick = () => { navigator.clipboard.writeText(rows.map(x=>x.map(v=>v==null?"":v).join("\t")).join("\n")); btn.textContent = "Copied"; };
   out.appendChild(btn);
+
+  const bar = add("div", null, "tabs"), tbs = ["Results", "Graphs"].map(t => add("button", t, "tab"));
+  const show = k => { activeTab = k; out.style.display = k ? "none" : ""; gr.style.display = k ? "" : "none"; tbs.forEach((b, j) => b.classList.toggle("on", j === k)); };
+  tbs.forEach((b, j) => { b.onclick = () => show(j); bar.appendChild(b); });
+  root.append(bar, out, gr);
+  buildGraphs(gr, r, add, table);
+  show(activeTab);
+}
+
+// ===================== GRAPHS =====================
+let activeTab = 0;
+const esc = t => String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const PAL = ["var(--acc)","var(--bad)","var(--ok)","var(--amber)","var(--purple)"];
+const EV_CM = 8065.544, NM_EV = 1239.84198;
+
+function niceTicks(a, b, n, int){
+  const span = (b - a) || 1, raw = span / n, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
+  let step = (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p; if (int) step = Math.max(1, Math.round(step));
+  const t = []; for (let v = Math.ceil(a/step - 1e-9) * step; v <= b + step*1e-9; v += step) t.push(+v.toFixed(12)); return t;
+}
+const fmtTick = v => { const a = Math.abs(v); return (a !== 0 && (a >= 1e6 || a < 1e-3)) ? v.toExponential(1).replace("e+","e") : String(+v.toFixed(10)); };
+
+// o: {xmin,xmax,ymin,ymax,logY,y2max,xlabel,ylabel,y2label,title,xInt,left,shade:[{x0,x1,label}],labels:[{x,y,text}],items:[{type:'line'|'pts'|'stick'|'hline',x,y,color,name,tips,axis}]}
+function chartSVG(o){
+  const W = 860, H = o.H || 400, L = o.left || 82, R = o.y2max ? 66 : 22, T = o.title ? 54 : 34, B = 54, LY = o.title ? 41 : 17, pw = W-L-R, ph = H-T-B;
+  const tr = v => o.logY ? Math.log10(Math.max(v, 1e-300)) : v, y0 = tr(o.ymin), y1 = tr(o.ymax);
+  const sx = v => L + (v - o.xmin) / (o.xmax - o.xmin) * pw;
+  const sy = v => T + ph - (Math.min(Math.max(tr(v), y0), y1) - y0) / (y1 - y0) * ph;
+  const sy2 = v => T + ph - Math.min(v / o.y2max, 1) * ph;
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" style="font:12px system-ui,sans-serif"><rect width="' + W + '" height="' + H + '" style="fill:var(--card)"/>';
+  if (o.title) s += '<text x="' + L + '" y="21" style="fill:var(--fg);font-weight:600;font-size:14px">' + esc(o.title) + '</text>';
+  (o.shade || []).forEach(z => { const xa = sx(Math.max(z.x0, o.xmin)), xb = sx(Math.min(z.x1, o.xmax)); if (xb > xa) s += '<rect x="' + xa + '" y="' + T + '" width="' + (xb-xa) + '" height="' + ph + '" style="fill:var(--mut);opacity:.15"/>' + (z.label ? '<text x="' + (xa+5) + '" y="' + (T+16) + '" text-anchor="start" style="fill:var(--mut);font-size:11px">' + esc(z.label) + '</text>' : ""); });
+  let yt = o.logY ? [] : niceTicks(o.ymin, o.ymax, 6);
+  if (o.logY) for (let k = Math.ceil(y0 - 1e-9); k <= Math.floor(y1 + 1e-9); k++) yt.push(Math.pow(10, k));
+  yt.forEach(v => { const y = sy(v); s += '<line x1="' + L + '" x2="' + (L+pw) + '" y1="' + y + '" y2="' + y + '" style="stroke:var(--bd);stroke-width:.7"/><text x="' + (L-8) + '" y="' + (y+4) + '" text-anchor="end" style="fill:var(--mut)">' + (o.logY ? "1e" + Math.round(Math.log10(v)) : fmtTick(v)) + '</text>'; });
+  niceTicks(o.xmin, o.xmax, 8, o.xInt).forEach(v => { const x = sx(v); s += '<line x1="' + x + '" x2="' + x + '" y1="' + (T+ph) + '" y2="' + (T+ph+5) + '" style="stroke:var(--mut)"/><text x="' + x + '" y="' + (T+ph+19) + '" text-anchor="middle" style="fill:var(--mut)">' + fmtTick(v) + '</text>'; });
+  if (o.y2max) niceTicks(0, o.y2max, 5).forEach(v => { const y = sy2(v); s += '<text x="' + (L+pw+8) + '" y="' + (y+4) + '" style="fill:var(--bad)">' + fmtTick(v) + '</text>'; });
+  s += '<path d="M' + L + ' ' + T + 'V' + (T+ph) + 'H' + (L+pw) + '" style="fill:none;stroke:var(--mut)"/>';
+  o.items.forEach(it => {
+    const col = it.color;
+    if (it.type === "hline") { const y = sy(it.y); s += '<line x1="' + L + '" x2="' + (L+pw) + '" y1="' + y + '" y2="' + y + '" style="stroke:' + col + ';stroke-dasharray:6 4;stroke-width:1.4"/>'; return; }
+    if (it.type === "stick") { it.x.forEach((xv, i) => { const x = sx(xv), yb = sy2(0), yt2 = sy2(it.y[i]); s += '<line x1="' + x + '" x2="' + x + '" y1="' + yb + '" y2="' + yt2 + '" style="stroke:' + col + ';stroke-width:2"/><line x1="' + x + '" x2="' + x + '" y1="' + yb + '" y2="' + T + '" style="stroke:transparent;stroke-width:9"><title>' + esc(it.tips ? it.tips[i] : "") + '</title></line>'; }); return; }
+    const pts = it.x.map((xv, i) => [sx(xv), sy(it.y[i]), i]).filter(p => isFinite(p[1]));
+    if (pts.length > 1) s += '<path d="M' + pts.map(p => p[0].toFixed(1) + " " + p[1].toFixed(1)).join("L") + '" style="fill:none;stroke:' + col + ';stroke-width:2"/>';
+    if (it.type === "pts") pts.forEach(p => { s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="3.6" style="fill:' + col + '"><title>' + esc(it.tips ? it.tips[p[2]] : "") + '</title></circle>'; });
+  });
+  (o.labels || []).forEach(q => { s += '<text x="' + sx(q.x) + '" y="' + (sy(q.y) - 7) + '" text-anchor="middle" style="fill:var(--fg);font-size:11px">' + esc(q.text) + '</text>'; });
+  const leg = o.items.filter(i => i.name); let lx = L + pw;
+  leg.slice().reverse().forEach(it => { const w = 30 + it.name.length * 6.3 + 12; lx -= w; s += '<line x1="' + lx + '" x2="' + (lx+20) + '" y1="' + LY + '" y2="' + LY + '" style="stroke:' + it.color + ';stroke-width:2.5;' + (it.type==="hline" ? "stroke-dasharray:5 3" : "") + '"/><text x="' + (lx+25) + '" y="' + (LY+4) + '" style="fill:var(--fg)">' + esc(it.name) + '</text>'; });
+  s += '<text x="' + (L+pw/2) + '" y="' + (H-10) + '" text-anchor="middle" style="fill:var(--fg)">' + esc(o.xlabel) + '</text>';
+  s += '<text transform="rotate(-90 15 ' + (T+ph/2) + ')" x="15" y="' + (T+ph/2) + '" text-anchor="middle" style="fill:var(--fg)">' + esc(o.ylabel) + '</text>';
+  if (o.y2max) s += '<text transform="rotate(90 ' + (W-12) + ' ' + (T+ph/2) + ')" x="' + (W-12) + '" y="' + (T+ph/2) + '" text-anchor="middle" style="fill:var(--bad)">' + esc(o.y2label || "") + '</text>';
+  return s + "</svg>";
+}
+
+function saveBlob(name, blob){ const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
+function exportable(box){
+  const svg = box.querySelector("svg"), vb = svg.viewBox.baseVal, cs = getComputedStyle(document.documentElement);
+  return {w: vb.width, h: vb.height, text: svg.outerHTML.replace(/var\((--[\w-]+)\)/g, (m, n) => cs.getPropertyValue(n).trim() || "#000").replace("<svg ", '<svg width="' + vb.width + '" height="' + vb.height + '" ')};
+}
+function exportSVG(box, name){ saveBlob(name + ".svg", new Blob([exportable(box).text], {type:"image/svg+xml"})); }
+function exportPNG(box, name){
+  const e = exportable(box), img = new Image();
+  img.onload = () => { const c = document.createElement("canvas"); c.width = e.w * 2; c.height = e.h * 2; const g = c.getContext("2d"); g.scale(2, 2); g.drawImage(img, 0, 0, e.w, e.h); c.toBlob(b => saveBlob(name + ".png", b)); };
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(e.text);
+}
+function exportRow(host, add, box, name, extra){
+  const row = add("div", null, "ctrl");
+  const b1 = add("button", "Save SVG"), b2 = add("button", "Save PNG");
+  b1.onclick = () => exportSVG(box, name); b2.onclick = () => exportPNG(box, name);
+  row.append(b1, b2); (extra || []).forEach(b => row.appendChild(b)); host.appendChild(row); return row;
+}
+function logRange(vals){
+  const p = vals.filter(v => v > 0 && isFinite(v)); if (!p.length) return [1e-3, 1];
+  let lo = Math.floor(Math.log10(Math.min(...p))), hi = Math.ceil(Math.log10(Math.max(...p))); if (hi <= lo) hi = lo + 1;
+  return [Math.pow(10, lo), Math.pow(10, hi)];
+}
+function linRange(vals, pad){
+  const p = vals.filter(isFinite); let lo = Math.min(...p), hi = Math.max(...p);
+  if (hi - lo < 1e-9) { lo -= 1e-6; hi += 1e-6; } const d = (hi - lo) * pad; return [lo - d, hi + d];
+}
+const orbLabel = (n, nOcc) => n <= nOcc ? (n === nOcc ? "HOMO" : "HOMO−" + (nOcc - n)) : (n === nOcc + 1 ? "LUMO" : "LUMO+" + (n - nOcc - 1));
+
+function buildGraphs(gr, r, add, table){
+  const sec = title => { gr.appendChild(add("h2", title)); const d = add("div"); gr.appendChild(d); return d; };
+  let d = sec("UV-Vis spectrum");
+  if (r.td) buildSpectrum(d, r, add, table);
+  else d.appendChild(add("p", "✗ not in this calculation: no excited-state (TD) results in this log. Add td(nstates=N) to the route line to get a UV-Vis spectrum.", "note"));
+  d = sec("SCF convergence");
+  if (r.scf.some(q => q.trace && q.trace.length)) buildSCF(d, r, add); else d.appendChild(add("p", "✗ not found: no SCF iteration data in this log.", "note"));
+  d = sec("Geometry optimization convergence");
+  if (r.steps.length) buildOpt(d, r, add); else d.appendChild(add("p", "✗ not in this calculation: no geometry optimization (no 'opt' in the route, or no steps found).", "note"));
+}
+
+function buildSpectrum(host, r, add, table){
+  const st = r.td.states, eMax = Math.max(...st.map(q => q.eV)), nmMin = NM_EV / eMax, nmMax = NM_EV / Math.min(...st.map(q => q.eV)), fmax = Math.max(...st.map(q => q.f));
+  const ctrl = add("div", null, "ctrl");
+  ctrl.innerHTML = '<label>Broadening FWHM <input type="number" id="sp_w" value="0.30" min="0.02" max="2" step="0.05"> eV</label>' +
+    '<label>x-axis <select id="sp_u"><option value="nm">Wavelength (nm)</option><option value="eV">Energy (eV)</option></select></label>' +
+    '<label>Range <input type="number" id="sp_a" value="200" step="10"> to <input type="number" id="sp_b" value="800" step="10"> <span id="sp_unit">nm</span></label>' +
+    '<label><input type="checkbox" id="sp_s" checked> Show sticks (f)</label><label><input type="checkbox" id="sp_n"> Normalize</label><label><input type="checkbox" id="sp_l" checked> Label peaks</label>';
+  const box = add("div", null, "chart"), note = add("p", null, "note"), pk = add("div");
+  const csvBtn = add("button", "Save curve + states (CSV)");
+  host.append(ctrl, box, note);
+  const q = id => ctrl.querySelector("#" + id);
+  let cur = null;
+  function update(){
+    const unit = q("sp_u").value, w = Math.max(0.01, +q("sp_w").value || 0.3); let a = +q("sp_a").value, b = +q("sp_b").value;
+    if (unit === "nm") a = Math.max(a, 1);
+    if (!(b > a)) { box.textContent = "Set a valid range (to must be larger than from)."; return; }
+    const Dc = w * EV_CM, nus = st.map(x => x.eV * EV_CM), N = 800, xs = [], ys = [];
+    for (let k = 0; k <= N; k++) {
+      const x = a + (b - a) * k / N, nu = (unit === "nm" ? NM_EV / x : x) * EV_CM; let sum = 0;
+      for (let i = 0; i < st.length; i++) { const dd = nu - nus[i]; sum += st[i].f * Math.exp(-2.7726 * dd * dd / (Dc * Dc)); }
+      xs.push(x); ys.push(2.174e8 * sum / Dc);
+    }
+    const mx = Math.max(...ys), norm = q("sp_n").checked, yv = ys.map(v => norm ? (mx ? v / mx : 0) : v), ymax = norm ? 1.15 : (mx > 0 ? mx * 1.15 : 1);
+    const showS = q("sp_s").checked, xOf = x => unit === "nm" ? x.nm : x.eV, sticks = st.filter(x => xOf(x) >= a && xOf(x) <= b);
+    const peaks = []; for (let k = 1; k < N; k++) if (ys[k] > ys[k-1] && ys[k] >= ys[k+1] && ys[k] > 0.03 * mx) peaks.push(k);
+    peaks.sort((p1, p2) => ys[p2] - ys[p1]); const top = peaks.slice(0, 8);
+    const items = [];
+    if (showS) items.push({type:"stick", axis:2, x:sticks.map(xOf), y:sticks.map(x => x.f), color:"var(--bad)", name:"Oscillator strength f (right axis)", tips:sticks.map(x => "State " + x.n + " (" + x.sym + "): " + x.nm.toFixed(1) + " nm, " + x.eV.toFixed(3) + " eV, f = " + x.f.toFixed(4))});
+    items.push({type:"line", x:xs, y:yv, color:"var(--acc)", name:"Spectrum (Gaussian, FWHM " + w + " eV)"});
+    const shade = unit === "nm" ? (a < nmMin ? [{x0:a, x1:Math.min(b, nmMin), label:"not computed"}] : []) : (b > eMax ? [{x0:Math.max(a, eMax), x1:b, label:"not computed"}] : []);
+    const svg = chartSVG({xmin:a, xmax:b, ymin:0, ymax, y2max: showS ? (fmax > 0 ? fmax * 1.15 : 1) : 0, xlabel: unit === "nm" ? "Wavelength (nm)" : "Energy (eV)", ylabel: norm ? "Normalized absorbance" : "ε (L mol⁻¹ cm⁻¹)", y2label:"Oscillator strength f", shade, items,
+      labels: q("sp_l").checked ? top.map(k => ({x:xs[k], y:yv[k], text: unit === "nm" ? Math.round(xs[k]) + " nm" : xs[k].toFixed(2) + " eV"})) : []});
+    box.innerHTML = svg; cur = {xs, ys: yv, unit, norm};
+    note.textContent = st.length + " states computed, covering " + nmMin.toFixed(0) + "–" + nmMax.toFixed(0) + " nm (" + Math.min(...st.map(x => x.eV)).toFixed(2) + "–" + eMax.toFixed(2) + " eV). Shaded = beyond the highest computed state, so bands there are missing. Each state is broadened by a Gaussian of the chosen FWHM. TD-DFT gives vertical excitations: compare band shapes and positions, and expect a systematic shift versus experiment.";
+    pk.textContent = "";
+    if (top.length) { pk.appendChild(add("p", "Peaks of the broadened curve", "note")); pk.appendChild(table(["λ (nm)", "Energy (eV)", norm ? "Relative height" : "ε (L mol⁻¹ cm⁻¹)"], top.slice().sort((p1, p2) => ys[p2] - ys[p1]).map(k => { const nm = unit === "nm" ? xs[k] : NM_EV / xs[k], ev = unit === "nm" ? NM_EV / xs[k] : xs[k]; return [nm.toFixed(1), ev.toFixed(3), norm ? yv[k].toFixed(3) : Math.round(ys[k]).toString()]; }))); }
+  }
+  q("sp_u").onchange = () => { const nm = q("sp_u").value === "nm"; q("sp_a").value = nm ? 200 : 1.5; q("sp_b").value = nm ? 800 : 6.5; q("sp_a").step = q("sp_b").step = nm ? 10 : 0.25; q("sp_unit").textContent = nm ? "nm" : "eV"; update(); };
+  ["sp_w","sp_a","sp_b","sp_s","sp_n","sp_l"].forEach(id => { q(id).oninput = update; q(id).onchange = update; });
+  csvBtn.onclick = () => {
+    if (!cur) return;
+    let t = "# Broadened spectrum\n" + (cur.unit === "nm" ? "wavelength_nm,energy_eV" : "energy_eV,wavelength_nm") + "," + (cur.norm ? "normalized" : "epsilon_L_mol-1_cm-1") + "\n";
+    cur.xs.forEach((x, i) => { const o2 = cur.unit === "nm" ? NM_EV / x : NM_EV / x; t += x.toFixed(4) + "," + o2.toFixed(4) + "," + cur.ys[i].toExponential(5) + "\n"; });
+    t += "\n# Excited states\nstate,symmetry,energy_eV,wavelength_nm,f\n" + st.map(x => [x.n, x.sym, x.eV, x.nm, x.f].join(",")).join("\n") + "\n";
+    saveBlob("uv-vis.csv", new Blob([t], {type:"text/csv"}));
+  };
+  exportRow(host, add, box, "uv-vis-spectrum", [csvBtn]);
+  host.appendChild(pk);
+  update();
+}
+
+function buildSCF(host, r, add){
+  const cand = []; r.scf.forEach((s, i) => { if (s.trace && s.trace.length) cand.push(i); });
+  const ctrl = add("div", null, "ctrl"), box = add("div", null, "chart"), note = add("p", null, "note");
+  const sel = add("select"), met = add("select"), st0 = add("input");
+  cand.forEach(i => { const s = r.scf[i], o = add("option", "#" + (i+1) + (s.label ? " " + s.label : "") + " · " + s.cycles + " cycles · E = " + s.E); o.value = i; sel.appendChild(o); });
+  sel.value = (cand.indexOf(r.finalIdx) >= 0 ? r.finalIdx : cand[cand.length-1]);
+  [["E","Energy (Hartree)"],["Ef","|E − E(final)| (log)"],["dE","|ΔE| per cycle (log)"],["err","DIIS error (log)"]].forEach(([v, t]) => { const o = add("option", t); o.value = v; met.appendChild(o); });
+  st0.type = "number"; st0.value = 1; st0.min = 1; st0.step = 1;
+  const l1 = add("label", "SCF run "), l2 = add("label", "Plot "), l3 = add("label", "Start at cycle ");
+  l1.appendChild(sel); l2.appendChild(met); l3.appendChild(st0); ctrl.append(l1, l2, l3);
+  host.append(ctrl, box, note);
+  function update(){
+    const s = r.scf[+sel.value], tr = s.trace, m = met.value, k0 = Math.max(1, Math.floor(+st0.value || 1)), Ef = tr[tr.length-1].E;
+    const idx = tr.map((_, i) => i).filter(i => i + 1 >= k0);
+    const xs = idx.map(i => i + 1);
+    let ys, log = false, ylabel, tips;
+    if (m === "E") { ys = idx.map(i => tr[i].E); ylabel = "SCF energy (Hartree)"; }
+    else if (m === "Ef") { ys = idx.map(i => Math.max(Math.abs(tr[i].E - Ef), 1e-13)); log = true; ylabel = "|E − E(final)| (Hartree)"; }
+    else if (m === "dE") { ys = idx.map(i => tr[i].dE == null ? NaN : Math.max(Math.abs(tr[i].dE), 1e-13)); log = true; ylabel = "|ΔE| (Hartree)"; }
+    else { ys = idx.map(i => tr[i].err == null ? NaN : tr[i].err); log = true; ylabel = "DIIS error"; }
+    tips = idx.map(i => "Cycle " + (i+1) + ": E = " + tr[i].E.toFixed(8) + ", ΔE = " + (tr[i].dE == null ? "n/a" : tr[i].dE.toExponential(2)) + (tr[i].err != null ? ", DIIS error = " + tr[i].err.toExponential(2) : ""));
+    if (xs.length < 1 || ys.every(v => !isFinite(v))) { box.textContent = "Nothing to plot for these settings."; note.textContent = ""; return; }
+    const rg = log ? logRange(ys) : linRange(ys, 0.06);
+    box.innerHTML = chartSVG({xmin: xs[0] - 0.5, xmax: xs[xs.length-1] + 0.5, ymin: rg[0], ymax: rg[1], logY: log, xInt: true, xlabel: "SCF cycle", ylabel, left: log ? 70 : 96, items: [{type:"pts", x:xs, y:ys, color:"var(--acc)", tips}]});
+    note.textContent = "Gaussian reported " + s.cycles + " cycles; " + tr.length + " iteration energies were found in the log. Final E = " + s.E + " Hartree." + (+s.cycles !== tr.length ? " (Counts differ because Gaussian may print extra or restarted iterations.)" : "");
+  }
+  sel.onchange = met.onchange = st0.oninput = update;
+  exportRow(host, add, box, "scf-convergence");
+  update();
+}
+
+function buildOpt(host, r, add){
+  const S = r.steps, xs = S.map((_, i) => i + 1), Es = S.map(s => s.E == null ? NaN : parseFloat(s.E));
+  const box1 = add("div", null, "chart"), rg = linRange(Es, 0.08);
+  box1.innerHTML = chartSVG({xmin: 0.5, xmax: xs.length + 0.5, ymin: rg[0], ymax: rg[1], xInt: true, xlabel: "Optimization step", ylabel: "Energy (Hartree)", left: 96, title: "Energy per optimization step", items: [{type:"pts", x:xs, y:Es, color:"var(--acc)", tips: S.map((s, i) => "Step " + (i+1) + ": E = " + s.E + (i && s.E && S[i-1].E ? ", ΔE = " + (parseFloat(s.E) - parseFloat(S[i-1].E)).toFixed(9) : ""))}]});
+  host.appendChild(box1); exportRow(host, add, box1, "opt-energy");
+  const names = ["Max force", "RMS force", "Max displacement", "RMS displacement"], ratios = names.map((_, k) => S.map(s => { const v = parseFloat(s.vals[k]), t = parseFloat(s.thr[k]); return t > 0 ? Math.max(v / t, 1e-6) : NaN; }));
+  const lr = logRange([].concat(...ratios, [1]));
+  const box2 = add("div", null, "chart");
+  box2.innerHTML = chartSVG({xmin: 0.5, xmax: xs.length + 0.5, ymin: lr[0], ymax: lr[1], logY: true, xInt: true, xlabel: "Optimization step", ylabel: "Value / convergence threshold", left: 70, title: "Convergence criteria (all four must be ≤ 1)",
+    items: [{type:"hline", y:1, color:"var(--mut)", name:"threshold"}].concat(names.map((n, k) => ({type:"pts", x:xs, y:ratios[k], color:PAL[k], name:n, tips: S.map((s, i) => n + ", step " + (i+1) + ": " + s.vals[k] + " (threshold " + s.thr[k] + ")")})))});
+  host.appendChild(box2); exportRow(host, add, box2, "opt-criteria");
+  host.appendChild(add("p", S.length + " step(s). Converged: " + (r.optConverged ? "yes" : "no") + (r.optConverged ? "" : ". The last point is the last step Gaussian printed.") + " Points at the dashed line (value = threshold) meet that criterion.", "note"));
 }
 
 function load(file){ if (!file) return; const fr = new FileReader(); fr.onload = () => render(parseGaussian(fr.result)); fr.readAsText(file); }
